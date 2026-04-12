@@ -10,7 +10,6 @@
 #include "driverlib/uart.h"
 #include "utils/uartstdio.h"
 #include "utils/cmdline.h"
-#include "driverlib/pin_map.h"
 #include "driverlib/rom.h"
 #include <stdlib.h>
 #include "inc/hw_ints.h"
@@ -26,12 +25,30 @@ volatile bool g_bCommandReady = false;
 char g_pcCmdBuf[32];
 volatile uint32_t g_ui32CmdBufInd = 0;
 float intervalo = 1.0;
+bool sinalPwm = 0;
 
-uint32_t pwmFreq = 10000;
+uint32_t pwmFreq = 100;
 uint32_t pwmPer;
+uint32_t pwmDuty = 50;
 
-//int Cmd_SetDutyCycle (int argc, char *argv[]);
-//int Cmd_SetFrequencia (int argc, char *argv[]);
+volatile bool g_bPrintPWM = true;
+
+void PWM0Gen0IntHandler(void)
+{
+    uint32_t status = PWMGenIntStatus(PWM0_BASE, PWM_GEN_0, true);
+    PWMGenIntClear(PWM0_BASE, PWM_GEN_0, status);
+
+    if (!g_bPrintPWM) return;
+
+    if (status & PWM_INT_CNT_ZERO)
+    {
+        sinalPwm = 1;
+    }
+    if (status & PWM_INT_CNT_AD)
+    {
+        sinalPwm = 0;
+    }
+}
 
 void UART0IntHandler(void)
 {
@@ -40,32 +57,33 @@ void UART0IntHandler(void)
 
     ui32Status = UARTIntStatus(UART0_BASE, true);
     UARTIntClear(UART0_BASE, ui32Status);
-    
+
     while(UARTCharsAvail(UART0_BASE))
     {
         charRecebido = UARTCharGet(UART0_BASE);
-        
-        if((charRecebido == 'i'))
+
+        if(charRecebido == 'i')
         {
             charRecebido = UARTCharGet(UART0_BASE);
-            if (charRecebido == '0') //Define o DutyCycle do sinal PWM
+
+            if (charRecebido == '0')
             {
                 index = 0;
-                while (((charRecebido != '\r') || (charRecebido != '\n')) && index < (MAX_STRING_LEN - 1))
+                while ((charRecebido != '\r') && (charRecebido != '\n') && index < (MAX_STRING_LEN - 1))
                 {
                     charRecebido = UARTCharGet(UART0_BASE);
                     buffer[index] = charRecebido;
                     index++;
                 }
                 buffer[index] = '\0';
-                PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, (pwmPer * (atoi(buffer))) / 100);
-                UARTprintf("Duty cycle definido para: %d", atoi(buffer));
-
+                pwmDuty = (uint32_t)atoi(buffer);
+                PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, (pwmPer * pwmDuty) / 100);
+                //UARTprintf("Duty cycle definido para: %d\r\n", pwmDuty);
             }
-            else if (charRecebido == '1') //Define a Frequência do sinal PWM
+            else if (charRecebido == '1')
             {
                 index = 0;
-                while (((charRecebido != '\r') || (charRecebido != '\n')) && index < (MAX_STRING_LEN - 1))
+                while ((charRecebido != '\r') && (charRecebido != '\n') && index < (MAX_STRING_LEN - 1))
                 {
                     charRecebido = UARTCharGet(UART0_BASE);
                     buffer[index] = charRecebido;
@@ -73,35 +91,31 @@ void UART0IntHandler(void)
                 }
                 buffer[index] = '\0';
                 pwmFreq = atoi(buffer);
-                pwmPer = (SysCtlClockGet() / pwmFreq) - 1;
+                pwmPer  = SysCtlClockGet() / pwmFreq;
                 PWMGenPeriodSet(PWM0_BASE, PWM_GEN_0, pwmPer);
-                UARTprintf("Frequencia definida para: %d", atoi(buffer));
-
-
-
+                PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, (pwmPer * pwmDuty) / 100);
+                //UARTprintf("Frequencia definida para: %d Hz\r\n", pwmFreq);
             }
-            else if (charRecebido == '2') //Define o intervalo de envio das tensões
+            else if (charRecebido == '2')
             {
                 index = 0;
-                while ((charRecebido != '\r') || (charRecebido != '\n') && index < (MAX_STRING_LEN - 1))
+                while ((charRecebido != '\r') && (charRecebido != '\n') && index < (MAX_STRING_LEN - 1))
                 {
                     charRecebido = UARTCharGet(UART0_BASE);
                     buffer[index] = charRecebido;
                     index++;
                 }
-            buffer[index] = '\0';
-            intervalo = atof(buffer);
-            int parte_inteira = (int)intervalo;
-            int parte_decimal = (int)((intervalo - parte_inteira) * 100);
-            if(parte_decimal < 0) parte_decimal *= -1;
-            UARTprintf("Intervalo de leitura definido para: %d.%02d segundos.\n", parte_inteira, parte_decimal);
+                buffer[index] = '\0';
+                intervalo = atof(buffer);
+                int parte_inteira = (int)intervalo;
+                int parte_decimal = (int)((intervalo - parte_inteira) * 100);
+                if(parte_decimal < 0) parte_decimal *= -1;
+                //UARTprintf("Intervalo de leitura definido para: %d.%02d segundos.\r\n", parte_inteira, parte_decimal);
             }
             break;
         }
-
     }
 }
-
 
 int main(void) {
     uint32_t adc_values[5];
@@ -121,12 +135,18 @@ int main(void) {
     SysCtlPWMClockSet(SYSCTL_PWMDIV_1);
     GPIOPinConfigure(GPIO_PB6_M0PWM0);
     GPIOPinTypePWM(GPIO_PORTB_BASE, GPIO_PIN_6);
-    // Frequência de 10 kHz → Período = 16 MHz / 10 kHz = 1600
-    pwmPer = (SysCtlClockGet() / pwmFreq) - 1;
+
+    pwmPer = SysCtlClockGet() / pwmFreq;
     PWMGenConfigure(PWM0_BASE, PWM_GEN_0, PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
     PWMGenPeriodSet(PWM0_BASE, PWM_GEN_0, pwmPer);
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, (pwmPer * pwmDuty) / 100);
     PWMGenEnable(PWM0_BASE, PWM_GEN_0);
     PWMOutputState(PWM0_BASE, PWM_OUT_0_BIT, true);
+
+    PWMGenIntRegister(PWM0_BASE, PWM_GEN_0, PWM0Gen0IntHandler);
+    PWMGenIntTrigEnable(PWM0_BASE, PWM_GEN_0, PWM_INT_CNT_ZERO | PWM_INT_CNT_AD);
+    PWMIntEnable(PWM0_BASE, PWM_INT_GEN_0);
+    IntEnable(INT_PWM0_0);
 
     SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
@@ -134,7 +154,6 @@ int main(void) {
 
     GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_3 | GPIO_PIN_2 | GPIO_PIN_1 | GPIO_PIN_0);
     GPIOPinTypeADC(GPIO_PORTD_BASE, GPIO_PIN_3);
-
 
     ADCSequenceConfigure(ADC0_BASE, 0, ADC_TRIGGER_PROCESSOR, 0);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 0, ADC_CTL_CH0);
@@ -146,9 +165,7 @@ int main(void) {
 
     while (1) {
         ADCProcessorTrigger(ADC0_BASE, 0);
-
         while (!ADCIntStatus(ADC0_BASE, 0, false)) {}
-
         ADCIntClear(ADC0_BASE, 0);
         ADCSequenceDataGet(ADC0_BASE, 0, adc_values);
 
@@ -156,25 +173,21 @@ int main(void) {
             voltages[i] = ((float)adc_values[i] * 3.3f) / 4095.0f;
         }
 
-        for (i = 0; i < 5; i++) {
+        for (i = 0; i < 4; i++) {
             int parte_inteira = (int)voltages[i];
             int parte_decimal = (int)((voltages[i] - parte_inteira) * 100);
-
             if(parte_decimal < 0) parte_decimal *= -1;
-
             UARTprintf("%d.%02d ", parte_inteira, parte_decimal);
         }
-        UARTprintf("\r\n");
-        
+        (sinalPwm == 1) ? UARTprintf("3.33\r\n") : UARTprintf("0.00\r\n");
 
         if (intervalo > 0) {
             SysCtlDelay((uint32_t)(SysCtlClockGet() * intervalo / 3.0f));
         }
     }
-    
+
     return 0;
 }
-
 
 void ConfigureUART0(void)
 {
